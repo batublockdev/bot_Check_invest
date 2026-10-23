@@ -1,6 +1,6 @@
 /**
- * db.js — PostgreSQL connection for StockWallet Bot state persistence.
- * Stores bot_state (lastProcessedBlock, pauseUntil, processedEvents) in a single row.
+ * db.js — PostgreSQL connection for StockWallet Bot.
+ * Stores bot_state + stockwallet_activity (historical log of bot evaluations).
  */
 
 import { Pool } from 'pg';
@@ -19,8 +19,7 @@ const pool = new Pool({
 let initialized = false;
 
 /**
- * Create the bot_state table if it doesn't exist.
- * Single-row design — key='singleton'.
+ * Create tables if they don't exist.
  */
 export async function initDB() {
   if (initialized) return;
@@ -40,8 +39,27 @@ export async function initDB() {
       INSERT INTO bot_state (key)
       VALUES ('singleton')
       ON CONFLICT (key) DO NOTHING;
+
+      CREATE TABLE IF NOT EXISTS stockwallet_activity (
+        id SERIAL PRIMARY KEY,
+        timestamp BIGINT NOT NULL,
+        type TEXT NOT NULL,
+        asset TEXT,
+        asset_symbol TEXT,
+        balance TEXT,
+        estimated_value TEXT,
+        invested TEXT,
+        action TEXT NOT NULL,
+        reason TEXT,
+        tx_hash TEXT,
+        pool_fee INTEGER,
+        confidence INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS stockwallet_activity_ts_idx
+        ON stockwallet_activity(timestamp DESC);
     `);
-    console.log('[DB] bot_state table ready in PostgreSQL');
+    console.log('[DB] Tables ready: bot_state, stockwallet_activity');
   } finally {
     client.release();
   }
@@ -49,7 +67,6 @@ export async function initDB() {
 
 /**
  * Load the bot state from PostgreSQL.
- * Returns null if not yet initialized.
  */
 export async function loadState() {
   const res = await pool.query(
@@ -96,6 +113,31 @@ export async function initState(latestBlock) {
      VALUES ('singleton', $1, 0, '[]', $2)
      ON CONFLICT (key) DO NOTHING`,
     [latestBlock, Date.now()]
+  );
+}
+
+/**
+ * Log an activity entry — every evaluation, investment, or sale.
+ */
+export async function logActivity(entry) {
+  await pool.query(
+    `INSERT INTO stockwallet_activity
+      (timestamp, type, asset, asset_symbol, balance, estimated_value, invested, action, reason, tx_hash, pool_fee, confidence)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    [
+      Date.now(),
+      entry.type,              // 'evaluation' | 'investment' | 'sale' | 'deposit' | 'pause'
+      entry.asset || null,
+      entry.assetSymbol || null,
+      entry.balance || null,
+      entry.estimatedValue || null,
+      entry.invested || null,
+      entry.action,            // 'HOLD' | 'SELL_ALL' | 'SELL_PROFIT' | 'INVEST' | 'SKIP' | 'PAUSE'
+      entry.reason || null,
+      entry.txHash || null,
+      entry.poolFee || null,
+      entry.confidence || null,
+    ]
   );
 }
 

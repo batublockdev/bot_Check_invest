@@ -28,6 +28,7 @@ import {
   saveState,
   initState,
   closeDB,
+  logActivity,
 } from './db.js';
 
 // --------------------------------------------------
@@ -238,11 +239,13 @@ async function investAfterDeposit(log) {
 
   if (isPaused()) {
     console.log('Investment skipped: pause is active.');
+    await logActivity({ type: 'deposit', action: 'SKIP', reason: 'Pause is active' });
     return;
   }
 
   if (DRY_RUN) {
     console.log('[DRY RUN] Not sending invest([]).');
+    await logActivity({ type: 'deposit', action: 'SKIP', reason: 'DRY_RUN mode' });
     return;
   }
 
@@ -269,6 +272,14 @@ async function investAfterDeposit(log) {
   console.log(
     `Investment confirmed at block ${receipt.blockNumber}.`
   );
+
+  await logActivity({
+    type: 'investment',
+    action: 'INVEST',
+    asset: log.args.token,
+    reason: `Deposit from ${log.args.user}`,
+    txHash: hash,
+  });
 }
 
 // --------------------------------------------------
@@ -354,6 +365,13 @@ async function processToken(token, baseToken, baseDecimals) {
 
   if (balance === 0n || invested === 0n) {
     console.log('No balance or registered investment; skipping.');
+    await logActivity({
+      type: 'evaluation',
+      asset: token,
+      assetSymbol: symbol,
+      action: 'SKIP',
+      reason: 'No balance or registered investment',
+    });
     return 'IGNORE';
   }
 
@@ -391,17 +409,43 @@ async function processToken(token, baseToken, baseDecimals) {
   console.log(`  Quoted pool fee: ${quote.fee}`);
   console.log(`  Action: ${action}`);
 
+  await logActivity({
+    type: 'evaluation',
+    asset: token,
+    assetSymbol: symbol,
+    balance: formatUnits(balance, decimals),
+    estimatedValue: formatUnits(currentValue, baseDecimals),
+    invested: formatUnits(invested, baseDecimals),
+    action: action === 'IGNORE' ? 'HOLD' : action,
+    poolFee: quote.fee,
+    reason: belowStop ? 'Stop loss triggered' : aboveTake ? 'Take profit triggered' : 'Within thresholds',
+  });
+
   if (action === 'IGNORE') return action;
 
   // The contract calculates how much to sell.
   // The bot only decides when to attempt the sale.
   if (DRY_RUN) {
     console.log(`[DRY RUN] Would attempt selltoken(${token}, '0x').`);
+    await logActivity({
+      type: 'sale',
+      asset: token,
+      assetSymbol: symbol,
+      action: action,
+      reason: 'DRY_RUN mode — sale not executed',
+    });
     return action;
   }
 
   if (isPaused()) {
     console.log('Sale cancelled: pause is active.');
+    await logActivity({
+      type: 'sale',
+      asset: token,
+      assetSymbol: symbol,
+      action: 'PAUSE',
+      reason: 'Pause is active — sale cancelled',
+    });
     return 'PAUSED';
   }
 
@@ -426,6 +470,19 @@ async function processToken(token, baseToken, baseDecimals) {
   }
 
   console.log(`Sale confirmed at block ${receipt.blockNumber}.`);
+
+  await logActivity({
+    type: 'sale',
+    asset: token,
+    assetSymbol: symbol,
+    action: action,
+    balance: formatUnits(balance, decimals),
+    estimatedValue: formatUnits(currentValue, baseDecimals),
+    invested: formatUnits(invested, baseDecimals),
+    reason: belowStop ? 'Stop loss triggered' : 'Take profit triggered',
+    txHash: hash,
+    poolFee: quote.fee,
+  });
 
   // Pause immediately, without waiting for the next log cycle.
   await activatePauseFromReceipt(receipt);
@@ -468,13 +525,29 @@ async function checkUsdtBalanceTrigger() {
     `Current balance: ${formatUnits(balance, decimals)} ${symbol}`
   );
 
-  if (balance < minimum) {
+if (balance < minimum) {
     console.log(`Balance below minimum of ${MIN_INVEST_HUMAN} ${symbol}.`);
+    await logActivity({
+      type: 'evaluation',
+      asset: token,
+      assetSymbol: symbol,
+      balance: formatUnits(balance, decimals),
+      action: 'HOLD',
+      reason: `Balance below minimum of ${MIN_INVEST_HUMAN}`,
+    });
     return;
   }
 
   if (DRY_RUN) {
     console.log('[DRY RUN] Balance meets minimum; not sending investment.');
+    await logActivity({
+      type: 'investment',
+      asset: token,
+      assetSymbol: symbol,
+      balance: formatUnits(balance, decimals),
+      action: 'HOLD',
+      reason: 'DRY_RUN — balance meets minimum but not investing',
+    });
     return;
   }
 
