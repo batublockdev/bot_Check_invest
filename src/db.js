@@ -22,7 +22,7 @@ let initialized = false;
  * Create the bot_state table if it doesn't exist.
  * Single-row design — key='singleton'.
  */
-export async function initDB(): Promise<void> {
+export async function initDB() {
   if (initialized) return;
   initialized = true;
 
@@ -51,11 +51,7 @@ export async function initDB(): Promise<void> {
  * Load the bot state from PostgreSQL.
  * Returns null if not yet initialized.
  */
-export async function loadState(): Promise<{
-  lastProcessedBlock: string;
-  pauseUntil: number;
-  processedEvents: string[];
-} | null> {
+export async function loadState() {
   const res = await pool.query(
     `SELECT last_processed_block, pause_until, processed_events
      FROM bot_state WHERE key = 'singleton'`
@@ -74,11 +70,7 @@ export async function loadState(): Promise<{
 /**
  * Save the bot state to PostgreSQL.
  */
-export async function saveState(state: {
-  lastProcessedBlock: string;
-  pauseUntil: number;
-  processedEvents: string[];
-}): Promise<void> {
+export async function saveState(state) {
   await pool.query(
     `UPDATE bot_state
      SET last_processed_block = $1,
@@ -98,7 +90,7 @@ export async function saveState(state: {
 /**
  * Initialize the state row with the first block number.
  */
-export async function initState(latestBlock: string): Promise<void> {
+export async function initState(latestBlock) {
   await pool.query(
     `INSERT INTO bot_state (key, last_processed_block, pause_until, processed_events, updated_at)
      VALUES ('singleton', $1, 0, '[]', $2)
@@ -110,7 +102,7 @@ export async function initState(latestBlock: string): Promise<void> {
 /**
  * Close the pool cleanly.
  */
-export async function closeDB(): Promise<void> {
+export async function closeDB() {
   await pool.end();
 }
 
