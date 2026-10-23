@@ -124,6 +124,17 @@ async function initialize() {
   state = await loadState();
 
   if (state) {
+    const lastBlock = BigInt(state.lastProcessedBlock);
+    const latestBlock = await publicClient.getBlockNumber();
+
+    // If lastProcessedBlock is 0 or unreasonably old, start from current block.
+    // This prevents scanning millions of historical blocks on first run.
+    if (lastBlock === 0n || (latestBlock - lastBlock) > BigInt(BLOCK_RANGE * 100n)) {
+      console.log(`Last block ${lastBlock} is too old or zero. Resetting to current block ${latestBlock}.`);
+      state.lastProcessedBlock = latestBlock.toString();
+      await saveState(state);
+    }
+
     console.log(`State loaded from DB. Last block: ${state.lastProcessedBlock}.`);
     return;
   }
