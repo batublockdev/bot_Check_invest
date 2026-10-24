@@ -29,6 +29,8 @@ import {
   initState,
   closeDB,
   logActivity,
+  updateAssetStatus,
+  purgeOldActivity,
 } from './db.js';
 
 // --------------------------------------------------
@@ -98,6 +100,8 @@ const walletClient = createWalletClient({
 
 let busy = false;
 let state = null;
+let lastPurgeTime = 0;
+const PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000; // Purge old logs every 6 hours
 
 // --------------------------------------------------
 // PERSISTENT STATE (PostgreSQL)
@@ -121,6 +125,7 @@ function logPauseStatus() {
 
 async function initialize() {
   await initDB();
+  await purgeOldActivity();
 
   state = await loadState();
 
@@ -162,9 +167,14 @@ async function activatePauseFromBlock(blockNumber) {
   state.pauseUntil = Math.max(state.pauseUntil, newPauseUntil);
   await saveState(state);
 
-  console.log(
-    `Pause activated until ${new Date(state.pauseUntil * 1000).toISOString()}`
-  );
+  const pauseDate = new Date(state.pauseUntil * 1000).toISOString();
+  console.log(`Pause activated until ${pauseDate}`);
+
+  await logActivity({
+    type: 'pause',
+    action: 'PAUSE',
+    reason: `Pause activated from block ${blockNumber} until ${pauseDate}`,
+  });
 }
 
 async function activatePauseFromReceipt(receipt) {
@@ -179,9 +189,15 @@ async function activatePauseFromReceipt(receipt) {
 
   await saveState(state);
 
-  console.log(
-    `Pause activated after sale until ${new Date(state.pauseUntil * 1000).toISOString()}`
-  );
+  const pauseDate = new Date(state.pauseUntil * 1000).toISOString();
+  console.log(`Pause activated after sale until ${pauseDate}`);
+
+  await logActivity({
+    type: 'pause',
+    action: 'PAUSE',
+    reason: `Pause activated after sale until ${pauseDate}`,
+    txHash: receipt.transactionHash,
+  });
 }
 
 // --------------------------------------------------
@@ -239,13 +255,23 @@ async function investAfterDeposit(log) {
 
   if (isPaused()) {
     console.log('Investment skipped: pause is active.');
-    await logActivity({ type: 'deposit', action: 'SKIP', reason: 'Pause is active' });
+    await logActivity({
+      type: 'deposit',
+      action: 'SKIP',
+      asset: log.args.token,
+      reason: 'Pause is active',
+    });
     return;
   }
 
   if (DRY_RUN) {
     console.log('[DRY RUN] Not sending invest([]).');
-    await logActivity({ type: 'deposit', action: 'SKIP', reason: 'DRY_RUN mode' });
+    await logActivity({
+      type: 'deposit',
+      action: 'SIMULATE_INVEST',
+      asset: log.args.token,
+      reason: `Deposit from ${log.args.user} — DRY_RUN mode`,
+    });
     return;
   }
 
@@ -365,10 +391,12 @@ async function processToken(token, baseToken, baseDecimals) {
 
   if (balance === 0n || invested === 0n) {
     console.log('No balance or registered investment; skipping.');
-    await logActivity({
-      type: 'evaluation',
+    await updateAssetStatus({
       asset: token,
-      assetSymbol: symbol,
+      symbol,
+      balance: formatUnits(balance, decimals),
+      estimatedValue: '0',
+      invested: formatUnits(invested, baseDecimals),
       action: 'SKIP',
       reason: 'No balance or registered investment',
     });
@@ -409,15 +437,15 @@ async function processToken(token, baseToken, baseDecimals) {
   console.log(`  Quoted pool fee: ${quote.fee}`);
   console.log(`  Action: ${action}`);
 
-  await logActivity({
-    type: 'evaluation',
+  // Update latest asset status (UPSERT — single row per token)
+  await updateAssetStatus({
     asset: token,
-    assetSymbol: symbol,
+    symbol,
     balance: formatUnits(balance, decimals),
     estimatedValue: formatUnits(currentValue, baseDecimals),
     invested: formatUnits(invested, baseDecimals),
-    action: action === 'IGNORE' ? 'HOLD' : action,
     poolFee: quote.fee,
+    action: action === 'IGNORE' ? 'HOLD' : action,
     reason: belowStop ? 'Stop loss triggered' : aboveTake ? 'Take profit triggered' : 'Within thresholds',
   });
 
@@ -431,8 +459,12 @@ async function processToken(token, baseToken, baseDecimals) {
       type: 'sale',
       asset: token,
       assetSymbol: symbol,
+      balance: formatUnits(balance, decimals),
+      estimatedValue: formatUnits(currentValue, baseDecimals),
+      invested: formatUnits(invested, baseDecimals),
       action: action,
-      reason: 'DRY_RUN mode — sale not executed',
+      poolFee: quote.fee,
+      reason: `DRY_RUN mode — ${belowStop ? 'Stop loss triggered' : 'Take profit triggered'}`,
     });
     return action;
   }
@@ -484,6 +516,13 @@ async function processToken(token, baseToken, baseDecimals) {
     poolFee: quote.fee,
   });
 
+  await updateAssetStatus({
+    asset: token,
+    symbol,
+    action: 'SOLD',
+    reason: belowStop ? 'Stop loss executed' : 'Take profit executed',
+  });
+
   // Pause immediately, without waiting for the next log cycle.
   await activatePauseFromReceipt(receipt);
 
@@ -525,16 +564,20 @@ async function checkUsdtBalanceTrigger() {
     `Current balance: ${formatUnits(balance, decimals)} ${symbol}`
   );
 
-if (balance < minimum) {
+  await updateAssetStatus({
+    asset: token,
+    symbol,
+    balance: formatUnits(balance, decimals),
+    estimatedValue: formatUnits(balance, decimals),
+    invested: '0',
+    action: balance < minimum ? 'HOLD' : 'INVEST_READY',
+    reason: balance < minimum
+      ? `Balance below minimum of ${MIN_INVEST_HUMAN} ${symbol}`
+      : 'Ready to invest',
+  });
+
+  if (balance < minimum) {
     console.log(`Balance below minimum of ${MIN_INVEST_HUMAN} ${symbol}.`);
-    await logActivity({
-      type: 'evaluation',
-      asset: token,
-      assetSymbol: symbol,
-      balance: formatUnits(balance, decimals),
-      action: 'HOLD',
-      reason: `Balance below minimum of ${MIN_INVEST_HUMAN}`,
-    });
     return;
   }
 
@@ -545,7 +588,7 @@ if (balance < minimum) {
       asset: token,
       assetSymbol: symbol,
       balance: formatUnits(balance, decimals),
-      action: 'HOLD',
+      action: 'SIMULATE_INVEST',
       reason: 'DRY_RUN — balance meets minimum but not investing',
     });
     return;
@@ -571,6 +614,16 @@ if (balance < minimum) {
   }
 
   console.log('Investment confirmed.');
+
+  await logActivity({
+    type: 'investment',
+    asset: token,
+    assetSymbol: symbol,
+    balance: formatUnits(balance, decimals),
+    action: 'INVEST',
+    reason: 'Balance threshold reached',
+    txHash: hash,
+  });
 }
 
 async function runSellCycle() {
@@ -781,6 +834,14 @@ async function runOnce() {
     // 3. Evaluate stop-loss and take-profit.
     if (!isPaused()) {
       await runSellCycle();
+    }
+
+    // 4. Periodic purge of obsolete DB logs.
+    if (Date.now() - lastPurgeTime > PURGE_INTERVAL_MS) {
+      lastPurgeTime = Date.now();
+      await purgeOldActivity().catch((err) =>
+        console.error('[DB] Periodic purge error:', err.message)
+      );
     }
 
   } catch (error) {
