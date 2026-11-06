@@ -739,6 +739,41 @@ async function processRange(fromBlock, toBlock) {
       await activatePauseFromBlock(log.blockNumber);
 
       console.log('Sale event detected; pause activated.');
+
+      // Guardar la venta detectada on-chain en stockwallet_activity
+      // con el tx_hash real para que el frontend pueda linkear a Celoscan
+      const saleTxHash = log.transactionHash;
+      const saleAction = (() => {
+        // Determinar si fue stop-loss o take-profit según el evento
+        const topics = log.topics || [];
+        const stopLossTopic = '0x053aab64f7d174599dcbd068de0d9d09566079ea61e26a2072285e4f3cc90adc'; // StopLossTriggered
+        const takeProfitTopic = '0x...'; // TakeProfitTriggered se identifica por el event name
+        if (topics[0]?.toLowerCase() === stopLossTopic) return 'SELL_ALL';
+        return 'SELL_PROFIT';
+      })();
+
+      // Extraer datos del evento según el tipo
+      const eventData = log.args || {};
+      const tokenSold = eventData.token || eventData.amountSold?.toString() || null;
+      const amountSold = eventData.amountSold?.toString() || null;
+      const amountOut = eventData.amountOut?.toString() || eventData.usdcReceived?.toString() || null;
+      const invested = eventData.invested?.toString() || null;
+
+      await logActivity({
+        type: 'sale',
+        asset: eventData.token || null,
+        assetSymbol: eventData.token || null,
+        action: saleAction,
+        balance: amountSold,
+        estimatedValue: amountOut,
+        invested: invested,
+        reason: saleAction === 'SELL_ALL'
+          ? 'Stop loss triggered — detected from on-chain event'
+          : 'Take profit triggered — detected from on-chain event',
+        txHash: saleTxHash,
+      });
+
+      console.log(`  Sale logged: ${saleAction} | TX: ${saleTxHash}`);
     } else if (log.kind === 'deposit') {
       await investAfterDeposit(log);
     }
