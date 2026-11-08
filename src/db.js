@@ -18,7 +18,6 @@ const pool = new Pool({
 });
 
 let initialized = false;
-const RETENTION_DAYS = Number(process.env.ACTIVITY_RETENTION_DAYS || '7');
 
 /**
  * Create tables if they don't exist.
@@ -196,28 +195,23 @@ export async function logActivity(entry) {
 }
 
 /**
- * Purge activity logs older than retentionDays (default 7 days).
- * Also cleans legacy spam logs (HOLD / SKIP) older than 1 hour.
+ * Purge HOLD logs older than 3 days.
+ * SKIP is no longer written to DB.
+ * Real activity (invest, sell, stop-loss, take-profit, etc.) is preserved permanently.
  */
-export async function purgeOldActivity(retentionDays = RETENTION_DAYS) {
+export async function purgeOldActivity() {
   try {
-    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-    const legacyCutoff = Date.now() - 60 * 60 * 1000;
+    const holdCutoff = Date.now() - 3 * 24 * 60 * 60 * 1000; // 3 days
 
-    const res1 = await pool.query(
-      `DELETE FROM stockwallet_activity WHERE timestamp < $1`,
-      [cutoff]
-    );
-
-    const res2 = await pool.query(
+    const res = await pool.query(
       `DELETE FROM stockwallet_activity
-       WHERE action IN ('HOLD', 'SKIP') AND timestamp < $1`,
-      [legacyCutoff]
+       WHERE action = 'HOLD' AND timestamp < $1`,
+      [holdCutoff]
     );
 
-    const totalPurged = (res1.rowCount || 0) + (res2.rowCount || 0);
+    const totalPurged = res.rowCount || 0;
     if (totalPurged > 0) {
-      console.log(`[DB] Purged ${totalPurged} obsolete activity records.`);
+      console.log(`[DB] Purged ${totalPurged} HOLD records older than 3 days.`);
     }
     return totalPurged;
   } catch (error) {

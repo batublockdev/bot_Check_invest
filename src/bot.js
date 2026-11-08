@@ -255,12 +255,6 @@ async function investAfterDeposit(log) {
 
   if (isPaused()) {
     console.log('Investment skipped: pause is active.');
-    await logActivity({
-      type: 'deposit',
-      action: 'SKIP',
-      asset: log.args.token,
-      reason: 'Pause is active',
-    });
     return;
   }
 
@@ -391,15 +385,6 @@ async function processToken(token, baseToken, baseDecimals) {
 
   if (balance === 0n || invested === 0n) {
     console.log('No balance or registered investment; skipping.');
-    await updateAssetStatus({
-      asset: token,
-      symbol,
-      balance: formatUnits(balance, decimals),
-      estimatedValue: '0',
-      invested: formatUnits(invested, baseDecimals),
-      action: 'SKIP',
-      reason: 'No balance or registered investment',
-    });
     return 'IGNORE';
   }
 
