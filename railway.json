@@ -4,8 +4,44 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "npm start",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
+  },
+  "services": {
+    "price-engine": {
+      "build": { "builder": "NIXPACKS" },
+      "deploy": {
+        "startCommand": "npm run price-engine",
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      }
+    },
+    "evaluator": {
+      "build": { "builder": "NIXPACKS" },
+      "deploy": {
+        "startCommand": "npm run evaluator",
+        "numReplicas": 1,
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      }
+    },
+    "executor": {
+      "build": { "builder": "NIXPACKS" },
+      "deploy": {
+        "startCommand": "npm run executor",
+        "numReplicas": 1,
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      }
+    },
+    "event-sync": {
+      "build": { "builder": "NIXPACKS" },
+      "deploy": {
+        "startCommand": "npm run event-sync",
+        "numReplicas": 1,
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      }
+    }
   }
 }

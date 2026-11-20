@@ -1,16 +1,21 @@
 {
   "name": "stockwallet-celo-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/bot.js",
-    "check": "node --check src/bot.js"
+    "price-engine": "node src/services/price-engine.js",
+    "evaluator": "node src/services/evaluator.js",
+    "executor": "node src/services/executor.js",
+    "event-sync": "node src/services/event-sync.js",
+    "migrate": "node src/migrate.js",
+    "check": "node --check src/services/price-engine.js && node --check src/services/evaluator.js && node --check src/services/executor.js"
   },
   "dependencies": {
-    "@celo/attribution-tags": "^0.5.0",
+    "bullmq": "^5.34.0",
     "dotenv": "^16.4.7",
     "ethers": "^6.13.5",
+    "ioredis": "^5.4.2",
     "pg": "^8.16.0",
     "viem": "^2.57.10"
   }
