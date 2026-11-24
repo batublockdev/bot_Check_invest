@@ -2,10 +2,15 @@
  * event-sync.js — Indexación de eventos on-chain para múltiples contratos.
  * BNB Chain (BSC) — Chain ID 56.
  *
+ * Además de escuchar eventos, pollée el balance USDT de cada contrato
+ * activo cada ciclo. Si detecta balance > 0 y no está en pause,
+ * encola execute-invest directamente (detecta transfers simples que
+ * no emiten AssetDeposited).
+ *
  * Uso: npm run event-sync
  */
 
-import { createPublicClient, http, getAddress } from 'viem';
+import { createPublicClient, http, getAddress, formatUnits } from 'viem';
 import { bsc } from 'viem/chains';
 import { Queue } from 'bullmq';
 
@@ -37,6 +42,58 @@ import {
 import { redis } from '../lib/redis.js';
 
 // --------------------------------------------------
+// ERC20 ABI for balance polling
+// --------------------------------------------------
+const erc20Abi = [
+  {
+    type: 'function',
+    name: 'balanceOf',
+    inputs: [{ name: 'account', type: 'address', internalType: 'address' }],
+    outputs: [{ name: '', type: 'uint256', internalType: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'decimals',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8', internalType: 'uint8' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'symbol',
+    inputs: [],
+    outputs: [{ name: '', type: 'string', internalType: 'string' }],
+    stateMutability: 'view',
+  },
+];
+
+// StockWallet ABI fragments for balance polling
+const stockWalletReadAbi = [
+  {
+    type: 'function',
+    name: 'usdc',
+    inputs: [],
+    outputs: [{ name: '', type: 'address', internalType: 'address' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'paused',
+    inputs: [],
+    outputs: [{ name: '', type: 'bool', internalType: 'bool' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'tradingPaused',
+    inputs: [],
+    outputs: [{ name: '', type: 'bool', internalType: 'bool' }],
+    stateMutability: 'view',
+  },
+];
+
+// --------------------------------------------------
 // Public client — BSC
 // --------------------------------------------------
 
@@ -52,6 +109,11 @@ const publicClient = createPublicClient({
 const executionQueue = new Queue(QUEUE_NAMES.EXECUTION, {
   connection: redis,
 });
+
+// --------------------------------------------------
+// Track wallets with pending invest to avoid duplicate jobs
+// --------------------------------------------------
+const pendingInvestWallets = new Set();
 
 // --------------------------------------------------
 // Events to fetch
@@ -120,7 +182,7 @@ async function processLog(wallet, log, runtimeState) {
 
   switch (kind) {
     case 'deposit': {
-      console.log(`[event-sync] Deposit on wallet ${wallet.id}: token=${args.token?.slice(0,8)}...`);
+      console.log(`[event-sync] Deposit on wallet ${wallet.id}: token=${args.token?.slice(0, 8)}...`);
 
       await logActivity({
         walletId: wallet.id,
@@ -197,6 +259,8 @@ async function processLog(wallet, log, runtimeState) {
         reason: `Investment executed — total: ${args.totalUsdc?.toString()}, gas: ${args.gasFee?.toString()}, agent: ${args.agentFee?.toString()}`,
         txHash: transactionHash,
       });
+      // Liberar el lock del invest watcher — el invest ya se ejecutó
+      pendingInvestWallets.delete(wallet.id);
       break;
     }
 
@@ -283,6 +347,108 @@ async function syncWalletEvents(wallet) {
 }
 
 // --------------------------------------------------
+// Poll USDT balances for all active wallets
+// Detecta deposits por transfer simple (sin evento AssetDeposited)
+// --------------------------------------------------
+
+async function pollContractBalances(wallets) {
+  for (const wallet of wallets) {
+    if (Number(wallet.chain_id) !== CHAIN_ID) continue;
+
+    // Skip if already has a pending invest job
+    if (pendingInvestWallets.has(wallet.id)) {
+      continue;
+    }
+
+    try {
+      const contractAddress = getAddress(wallet.contract_address);
+
+      // 1. Leer qué token base usa el contrato (usdc())
+      const baseToken = await publicClient.readContract({
+        address: contractAddress,
+        abi: stockWalletReadAbi,
+        functionName: 'usdc',
+      });
+
+      // 2. Leer balance del token base en el contrato
+      const balance = await publicClient.readContract({
+        address: baseToken,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [contractAddress],
+      });
+
+      if (balance === 0n) continue;
+
+      // 3. Leer decimals para mostrar legible
+      const decimals = await publicClient.readContract({
+        address: baseToken,
+        abi: erc20Abi,
+        functionName: 'decimals',
+      });
+
+      const humanBalance = formatUnits(balance, decimals);
+
+      // 4. Verificar pause states
+      const runtimeState = await getRuntimeState(wallet.id);
+      const isPaused = runtimeState && Math.floor(Date.now() / 1000) < Number(runtimeState.pause_until);
+
+      if (isPaused) {
+        console.log(`[event-sync] Wallet ${wallet.id}: USDT balance ${humanBalance} but paused, skipping invest`);
+        continue;
+      }
+
+      // 5. Verificar paused() y tradingPaused() on-chain
+      const [paused, tradingPaused] = await Promise.all([
+        publicClient.readContract({
+          address: contractAddress,
+          abi: stockWalletReadAbi,
+          functionName: 'paused',
+        }),
+        publicClient.readContract({
+          address: contractAddress,
+          abi: stockWalletReadAbi,
+          functionName: 'tradingPaused',
+        }).catch(() => false),
+      ]);
+
+      if (paused || tradingPaused) {
+        console.log(`[event-sync] Wallet ${wallet.id}: contract paused/tradingPaused, skipping invest`);
+        continue;
+      }
+
+      // 6. Balance detectado → encolar execute-invest
+      console.log(`[event-sync] 💰 Wallet ${wallet.id}: ${humanBalance} base token detected, enqueuing invest`);
+
+      pendingInvestWallets.add(wallet.id);
+
+      await logActivity({
+        walletId: wallet.id,
+        type: 'deposit',
+        asset: baseToken,
+        action: 'BALANCE_DETECTED',
+        balance: humanBalance,
+        reason: `Balance polling detected ${humanBalance} base token — enqueuing invest`,
+      });
+
+      await executionQueue.add('execute-invest', {
+        walletId: wallet.id,
+        contractAddress: wallet.contract_address,
+        chainId: wallet.chain_id,
+        detectedAt: Date.now(),
+      }, {
+        jobId: `invest-poll-${wallet.id}-${Date.now()}`,
+        removeOnComplete: 50,
+        removeOnFail: 20,
+      });
+
+    } catch (err) {
+      console.error(`[event-sync] Balance poll error for wallet ${wallet.id}:`, err.message);
+    }
+  }
+}
+
+// --------------------------------------------------
 // Main sync cycle
 // --------------------------------------------------
 
@@ -307,6 +473,7 @@ async function runSyncCycle() {
   let synced = 0;
   let errors = 0;
 
+  // 1. Sync events on-chain (deposits, sales, etc.)
   for (const wallet of wallets) {
     if (Number(wallet.chain_id) !== CHAIN_ID) continue;
 
@@ -318,6 +485,9 @@ async function runSyncCycle() {
       errors++;
     }
   }
+
+  // 2. Poll USDT balances — detecta transfers simples sin evento
+  await pollContractBalances(wallets);
 
   console.log(`[event-sync] Done: ${synced} synced, ${errors} errors`);
 }
