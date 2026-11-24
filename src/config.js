@@ -79,7 +79,11 @@ export const SNAPSHOT_TTL_SECONDS = 30; // 30s cache in Redis
 // Minimum base token (USDT) balance required to execute an invest.
 // Below this, gas costs exceed the value being invested.
 // 0.1 USDT = 100000000000000000 (18 decimals)
-export const MIN_INVEST_AMOUNT = BigInt(optional('MIN_INVEST_AMOUNT', '100000000000000000'));
+// Env var must be in wei (integer string). Default: 0.1 USDT
+const _rawMinInvest = optional('MIN_INVEST_AMOUNT', '100000000000000000');
+export const MIN_INVEST_AMOUNT = /^[0-9]+$/.test(_rawMinInvest)
+  ? BigInt(_rawMinInvest)
+  : BigInt('100000000000000000'); // fallback to 0.1 USDT
 
 // Validation
 if (!/^0x[0-9a-fA-F]{64}$/.test(BOT_PRIVATE_KEY)) {
