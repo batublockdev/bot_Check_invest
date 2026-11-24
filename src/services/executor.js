@@ -31,6 +31,7 @@ import {
   LOCK_TTL_SECONDS,
   DEDUP_TTL_SECONDS,
   DRY_RUN,
+  MIN_INVEST_AMOUNT,
 } from '../config.js';
 
 import {
@@ -543,7 +544,21 @@ async function processInvestJob(job) {
 
     if (usdcBalance === 0n) return { status: 'skipped', reason: 'no_usdc' };
 
-    console.log(`[executor] USDC balance: ${formatUnits(usdcBalance, 18)}`);
+    console.log(`[executor] USDT balance: ${formatUnits(usdcBalance, 18)}`);
+
+    // Minimum invest check — skip if balance < 0.1 USDT
+    // Gas cost of an invest TX (~100k gas @ 1 gwei = ~0.0001 BNB ≈ $0.05)
+    // is not worth it for amounts < 0.1 USDT
+    if (usdcBalance < MIN_INVEST_AMOUNT) {
+      console.log(
+        `[executor] USDT balance (${formatUnits(usdcBalance, 18)}) < minimum (${formatUnits(MIN_INVEST_AMOUNT, 18)}) — skipping invest, not worth gas cost`
+      );
+      await logActivity({
+        walletId, type: 'investment', action: 'SKIPPED',
+        reason: `Balance too low: ${formatUnits(usdcBalance, 18)} USDT < ${formatUnits(MIN_INVEST_AMOUNT, 18)} minimum`,
+      });
+      return { status: 'skipped', reason: 'below_min_invest' };
+    }
 
     await checkAgentRole(contract);
 

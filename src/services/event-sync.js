@@ -389,6 +389,14 @@ async function pollContractBalances(wallets) {
 
       const humanBalance = formatUnits(balance, decimals);
 
+      // 3b. Minimum invest check — don't enqueue if balance < 0.1 USDT
+      // Gas cost of invest TX exceeds value being invested for tiny amounts
+      const MIN_INVEST = BigInt('100000000000000000'); // 0.1 * 1e18
+      if (balance < MIN_INVEST) {
+        console.log(`[event-sync] Wallet ${wallet.id}: balance ${humanBalance} < 0.1 USDT minimum — not enqueuing invest (not worth gas)`);
+        continue;
+      }
+
       // 4. Verificar pause states
       const runtimeState = await getRuntimeState(wallet.id);
       const isPaused = runtimeState && Math.floor(Date.now() / 1000) < Number(runtimeState.pause_until);
