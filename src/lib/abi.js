@@ -59,6 +59,20 @@ export const quoterV2Abi = [
 ];
 
 // --------------------------------------------------
+// WBNB ABI — Wrapped BNB en BSC
+// --------------------------------------------------
+export const wbnbAbi = parseAbi([
+  'function deposit() payable',
+  'function withdraw(uint256 amount)',
+  'function balanceOf(address account) view returns (uint256)',
+  'function transfer(address to, uint256 amount) returns (bool)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+  'event Deposit(address indexed dst, uint256 wad)',
+  'event Withdrawal(address indexed src, uint256 wad)',
+]);
+
+// --------------------------------------------------
 // Eventos individuales (para getLogs)
 // --------------------------------------------------
 export const assetDepositedEvent = parseAbiItem(

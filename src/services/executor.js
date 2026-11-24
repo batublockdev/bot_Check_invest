@@ -37,7 +37,19 @@ import {
   stockWalletAbi,
   erc20Abi,
   quoterV2Abi,
+  wbnbAbi,
 } from '../lib/abi.js';
+
+// --------------------------------------------------
+// WBNB — BNB Chain
+// --------------------------------------------------
+const WBNB_ADDRESS = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c';
+
+// Gas management thresholds (in wei)
+const MIN_BNB_THRESHOLD = 100000n * 10n ** 15n;      // 0.0001 BNB — mínimo para operar
+const TARGET_BNB_BUFFER = 500000n * 10n ** 15n;       // 0.0005 BNB — buffer cómodo (10-20 TXs)
+const UNWRAP_COST_BNB = 21000n * 10n ** 9n;           // ~0.000021 BNB @ 1 gwei — costo del unwrap
+const UNWRAP_MAX_RATIO = 5n;                          // unwrap solo si costo < 5% del amount
 
 import {
   initDB,
@@ -69,6 +81,115 @@ const walletClient = createWalletClient({
   chain: bsc,
   transport: http(BSC_RPC_URL),
 });
+
+// --------------------------------------------------
+// Gas management — WBNB unwrap inteligente
+// --------------------------------------------------
+
+/**
+ * ensureGasBalance()
+ *
+ * Verifica el balance de BNB nativo del bot. Si es insuficiente para operar,
+ * hace unwrap de WBNB → BNB.
+ *
+ * Estrategia:
+ * - Si BNB >= MIN_BNB_THRESHOLD → no hace nada (tiene suficiente)
+ * - Si BNB < MIN_BNB_THRESHOLD y hay WBNB disponible:
+ *   - Calcula cuánto BNB necesita para llegar al TARGET_BNB_BUFFER
+ *   - Verifica que el costo del unwrap (< 5% del amount a unwrap)
+ *   - Si la relación es buena → unwrap
+ *   - Si la relación es mala (poco WBNB) → log warning, no unwrap
+ *
+ * @returns {Object} { bnbBalance, wbnbBalance, unwrapped, skipped }
+ */
+async function ensureGasBalance() {
+  // 1. Verificar balance BNB nativo
+  const bnbBalance = await publicClient.getBalance({ address: account.address });
+
+  // 2. Si tiene suficiente BNB → no hacer nada
+  if (bnbBalance >= MIN_BNB_THRESHOLD) {
+    return { bnbBalance, wbnbBalance: 0n, unwrapped: false, skipped: 'sufficient_bnb' };
+  }
+
+  // 3. Verificar balance WBNB
+  const wbnbBalance = await publicClient.readContract({
+    address: WBNB_ADDRESS,
+    abi: wbnbAbi,
+    functionName: 'balanceOf',
+    args: [account.address],
+  });
+
+  if (wbnbBalance === 0n) {
+    console.warn(`[executor] ⚠️ BNB bajo (${formatUnits(bnbBalance, 18)} BNB) y sin WBNB para unwrap`);
+    return { bnbBalance, wbnbBalance: 0n, unwrapped: false, skipped: 'no_wbnb' };
+  }
+
+  // 4. Calcular cuánto unwrap
+  const bnbNeeded = TARGET_BNB_BUFFER - bnbBalance;
+  const amountToUnwrap = wbnbBalance >= bnbNeeded ? bnbNeeded : wbnbBalance;
+
+  // 5. Verificar relación costo/beneficio
+  //    costo unwrap = UNWRAP_COST_BNB
+  //    beneficio = amountToUnwrap
+  //    Si costo > 5% del amount → no vale la pena
+
+  if (amountToUnwrap <= UNWRAP_COST_BNB) {
+    console.warn(
+      `[executor] ⚠️ WBNB muy poco (${formatUnits(wbnbBalance, 18)} BNB) — ` +
+      `unwrap costaría más de lo que recibiría. Acumulando...`
+    );
+    return { bnbBalance, wbnbBalance, unwrapped: false, skipped: 'insufficient_wbnb' };
+  }
+
+  const costRatio = (UNWRAP_COST_BNB * 100n) / amountToUnwrap;
+  if (costRatio > UNWRAP_MAX_RATIO) {
+    console.warn(
+      `[executor] ⚠️ Unwrap no rentable: costo ${formatUnits(UNWRAP_COST_BNB, 18)} BNB ` +
+      `vs ${formatUnits(amountToUnwrap, 18)} BNB (${costRatio}%). Acumulando WBNB...`
+    );
+    return { bnbBalance, wbnbBalance, unwrapped: false, skipped: 'not_profitable' };
+  }
+
+  // 6. Ejecutar unwrap: WBNB.withdraw(amount)
+  console.log(
+    `[executor] Unwrapping ${formatUnits(amountToUnwrap, 18)} WBNB → BNB ` +
+    `(bnb: ${formatUnits(bnbBalance, 18)}, wbnb: ${formatUnits(wbnbBalance, 18)})`
+  );
+
+  const nonce = await getNextNonce(publicClient, CHAIN_ID, account.address);
+
+  try {
+    const txHash = await walletClient.writeContract({
+      address: WBNB_ADDRESS,
+      abi: wbnbAbi,
+      functionName: 'withdraw',
+      args: [amountToUnwrap],
+      nonce,
+    });
+
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: txHash,
+      timeout: TX_TIMEOUT_MS,
+    });
+
+    if (receipt.status !== 'success') {
+      console.error(`[executor] Unwrap TX reverted: ${txHash}`);
+      await rollbackNonce(CHAIN_ID, account.address);
+      return { bnbBalance, wbnbBalance, unwrapped: false, skipped: 'tx_reverted' };
+    }
+
+    const newBnbBalance = await publicClient.getBalance({ address: account.address });
+    console.log(
+      `[executor] ✓ Unwrap confirmado: BNB ${formatUnits(bnbBalance, 18)} → ${formatUnits(newBnbBalance, 18)}`
+    );
+
+    return { bnbBalance: newBnbBalance, wbnbBalance, unwrapped: true, txHash };
+  } catch (err) {
+    console.error(`[executor] Unwrap failed:`, err.shortMessage ?? err.message);
+    await rollbackNonce(CHAIN_ID, account.address);
+    return { bnbBalance, wbnbBalance, unwrapped: false, skipped: 'unwrap_failed' };
+  }
+}
 
 // --------------------------------------------------
 // Contract read helper
@@ -152,6 +273,9 @@ async function processSellJob(job) {
   const lockKey = `lock:${chainId}:${contract.toLowerCase()}:${token.toLowerCase()}`;
 
   console.log(`[executor] Sell: ${triggerType} for ${token.slice(0, 8)}... on ${contract.slice(0, 8)}...`);
+
+  // Ensure bot has enough BNB for gas before executing
+  await ensureGasBalance();
 
   const locked = await acquireLock(lockKey, LOCK_TTL_SECONDS);
   if (!locked) {
@@ -392,6 +516,9 @@ async function processInvestJob(job) {
 
   const contract = getAddress(contractAddress);
   const lockKey = `lock:invest:${chainId}:${contract.toLowerCase()}`;
+
+  // Ensure bot has enough BNB for gas before executing
+  await ensureGasBalance();
 
   const locked = await acquireLock(lockKey, LOCK_TTL_SECONDS);
   if (!locked) return { status: 'skipped', reason: 'lock_held' };
