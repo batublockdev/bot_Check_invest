@@ -429,7 +429,10 @@ async function processInvestJob(job) {
       return { status: 'simulated', reason: 'dry_run' };
     }
 
-    // Build paths and v4Pools from contract config
+    // Build paths and v4Pools from contract config.
+    // Key: if no asset has V4 pools configured, pass EMPTY arrays
+    // (not arrays of empty values) so the contract uses V3 automatically.
+    // This matches the test pattern: invest(new bytes[](0), new V4PoolData[][](0))
     const assets = [];
     for (let i = 0; i < 100; i++) {
       try {
@@ -440,20 +443,38 @@ async function processInvestJob(job) {
       } catch { break; }
     }
 
+    // Check which assets have V4 pools configured on-chain
     const v4PoolsArray = [];
     const paths = [];
+    let hasAnyV4 = false;
 
     for (const token of assets) {
+      let v4Pools = [];
+      let path = '0x';
+
       try {
-        const v4Pools = await readContract(contract, 'getV4Pools', [token]);
-        v4PoolsArray.push(v4Pools || []);
-        const path = await readContract(contract, 'assetPath', [token]);
-        paths.push(path || '0x');
-      } catch {
-        v4PoolsArray.push([]);
-        paths.push('0x');
-      }
+        v4Pools = await readContract(contract, 'getV4Pools', [token]);
+        if (!v4Pools) v4Pools = [];
+        if (v4Pools.length > 0) hasAnyV4 = true;
+      } catch { /* no V4 pools */ }
+
+      try {
+        const rawPath = await readContract(contract, 'assetPath', [token]);
+        if (rawPath && rawPath !== '0x') path = rawPath;
+      } catch { /* default 0x */ }
+
+      v4PoolsArray.push(v4Pools);
+      paths.push(path);
     }
+
+    // If no asset has V4 pools AND no asset has a real path,
+    // pass completely empty arrays so the contract uses V3 only.
+    const hasAnyRealPath = paths.some(p => p !== '0x');
+    const finalPaths = (hasAnyV4 || hasAnyRealPath) ? paths : [];
+    const finalV4Pools = (hasAnyV4 || hasAnyRealPath) ? v4PoolsArray : [];
+
+    console.log(`[executor] Assets: ${assets.length}, V4 pools: ${hasAnyV4}, real paths: ${hasAnyRealPath}`);
+    console.log(`[executor] invest args: paths=${finalPaths.length}, v4Pools=${finalV4Pools.length}`);
 
     const nonce = await getNextNonce(publicClient, chainId, account.address);
 
@@ -463,7 +484,7 @@ async function processInvestJob(job) {
         address: contract,
         abi: stockWalletAbi,
         functionName: 'invest',
-        args: [paths, v4PoolsArray],
+        args: [finalPaths, finalV4Pools],
         account,
       });
       request = simResult.request;
