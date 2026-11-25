@@ -51,8 +51,19 @@ const publicClient = createPublicClient({
 // Execution queue
 // --------------------------------------------------
 
+// Dedicated connection for the producer Queue — never share the Worker's
+// ioredis connection with a Queue (causes silent add() hangs).
+const queueConnection = redis.duplicate();
+queueConnection.on('error', (err) => {
+  console.error('[evaluator] Queue connection error:', err.message);
+});
+
 const executionQueue = new Queue(QUEUE_NAMES.EXECUTION, {
-  connection: redis,
+  connection: queueConnection,
+});
+
+executionQueue.on('error', (err) => {
+  console.error('[evaluator] Execution queue error:', err.message);
 });
 
 // --------------------------------------------------
@@ -202,21 +213,28 @@ async function evaluateTokenPosition(wallet, token, priceSnapshot) {
     // default empty path
   }
 
-  await executionQueue.add('execute-sale', {
-    walletId: wallet.id,
-    contractAddress,
-    chainId: CHAIN_ID,
-    tokenAddress: token,
-    triggerType,
-    assetPath,
-    v4SellPools: v4SellPools || [],
-    priceSnapshotId: priceSnapshot.timestamp,
-    detectedAt: Date.now(),
-  }, {
-    jobId: dedupKey,
-    removeOnComplete: 100,
-    removeOnFail: 50,
-  });
+  try {
+    await executionQueue.add('execute-sale', {
+      walletId: wallet.id,
+      contractAddress,
+      chainId: CHAIN_ID,
+      tokenAddress: token,
+      triggerType,
+      assetPath,
+      v4SellPools: v4SellPools || [],
+      priceSnapshotId: priceSnapshot.timestamp,
+      detectedAt: Date.now(),
+    }, {
+      jobId: dedupKey,
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    });
+  } catch (addError) {
+    // Release dedup so the next cycle retries the enqueue cleanly
+    await clearDedup(dedupKey);
+    console.error(`[evaluator] ❌ Failed to enqueue execute-sale for ${token.slice(0, 8)}...:`, addError.message);
+    throw addError;
+  }
 
   await logActivity({
     walletId: wallet.id,
@@ -389,6 +407,7 @@ async function main() {
     console.log('[evaluator] Shutting down...');
     await worker.close();
     await executionQueue.close();
+    await queueConnection.quit();
     healthServer.close();
     await redis.quit();
     process.exit(0);
