@@ -234,11 +234,9 @@ async function evaluateTokenPosition(wallet, token, priceSnapshot) {
     JSON.stringify(jobPayload);
 
     await executionQueue.add('execute-sale', jobPayload, {
-      // jobId must be unique per attempt — a static jobId (the dedup key) gets
-      // silently dropped by BullMQ when a previous job with the same id still
-      // exists in the retained completed/failed sets. Redis dedup key already
-      // protects against duplicate triggers within the TTL window.
-      jobId: `${dedupKey}:${Date.now()}`,
+      // jobId must be unique per attempt and BullMQ forbids ":" in custom ids.
+      // Use dash-joined sanitized parts instead of the raw dedup key.
+      jobId: `exe-sale-${wallet.id}-${triggerType}-${Date.now()}`,
       removeOnComplete: 100,
       removeOnFail: 50,
     });
