@@ -286,10 +286,9 @@ async function processEvaluationJob(job) {
     // Skip if wrong chain
     if (Number(wallet.chain_id) !== CHAIN_ID) continue;
 
-    // Check wallet pause
-    const runtimeState = await getRuntimeState(wallet.id);
-    const isPaused = runtimeState && Math.floor(Date.now() / 1000) < Number(runtimeState.pause_until);
-    if (isPaused) continue;
+    // NOTE: runtimeState.pause_until only gates RE-INVEST (handled by executor
+    // + event-sync). SL/TP evaluation and sale detection must ALWAYS run — a
+    // paused wallet must keep being monitored.
 
     // Check contract pause/tradingPause
     try {

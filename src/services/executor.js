@@ -301,13 +301,9 @@ async function processSellJob(job) {
       return { status: 'skipped', reason: 'contract_paused' };
     }
 
-    // Check wallet pause
-    const runtimeState = await getRuntimeState(walletId);
-    if (runtimeState && Math.floor(Date.now() / 1000) < Number(runtimeState.pause_until)) {
-      console.log(`[executor] Wallet paused — skipping`);
-      await updateExecutionRecord(execRecordId, { status: 'failed', error: 'Wallet paused' });
-      return { status: 'skipped', reason: 'wallet_paused' };
-    }
+    // NOTE: runtimeState.pause_until only gates RE-INVEST (processInvestJob).
+    // Stop-loss / take-profit sales must always execute, even right after a
+    // previous sale triggered the reinvest pause.
 
     // Revalidate position
     const [balance, position, config, symbol, decimals] = await Promise.all([
