@@ -199,9 +199,13 @@ async function evaluateTokenPosition(wallet, token, priceSnapshot) {
   }
 
   // Read V4 sell pools and asset path for executor
+  // NOTE: serialize BigInt to string — BullMQ job payloads must be JSON-safe.
   let v4SellPools = [];
   try {
-    v4SellPools = await readContract(contractAddress, 'getV4SellPools', [token]);
+    const raw = await readContract(contractAddress, 'getV4SellPools', [token]);
+    v4SellPools = JSON.parse(JSON.stringify(raw ?? [], (_, v) =>
+      typeof v === 'bigint' ? v.toString() : v
+    ));
   } catch {
     // V4 may not be configured
   }
@@ -213,18 +217,23 @@ async function evaluateTokenPosition(wallet, token, priceSnapshot) {
     // default empty path
   }
 
+  const jobPayload = {
+    walletId: wallet.id,
+    contractAddress,
+    chainId: CHAIN_ID,
+    tokenAddress: token,
+    triggerType,
+    assetPath,
+    v4SellPools: v4SellPools || [],
+    priceSnapshotId: priceSnapshot.timestamp,
+    detectedAt: Date.now(),
+  };
+
   try {
-    await executionQueue.add('execute-sale', {
-      walletId: wallet.id,
-      contractAddress,
-      chainId: CHAIN_ID,
-      tokenAddress: token,
-      triggerType,
-      assetPath,
-      v4SellPools: v4SellPools || [],
-      priceSnapshotId: priceSnapshot.timestamp,
-      detectedAt: Date.now(),
-    }, {
+    // Defensive: fail fast with a clear error if payload is not JSON-safe
+    JSON.stringify(jobPayload);
+
+    await executionQueue.add('execute-sale', jobPayload, {
       // jobId must be unique per attempt — a static jobId (the dedup key) gets
       // silently dropped by BullMQ when a previous job with the same id still
       // exists in the retained completed/failed sets. Redis dedup key already
@@ -234,9 +243,24 @@ async function evaluateTokenPosition(wallet, token, priceSnapshot) {
       removeOnFail: 50,
     });
   } catch (addError) {
+    const errMsg = addError?.stack || addError?.message || String(addError);
     // Release dedup so the next cycle retries the enqueue cleanly
     await clearDedup(dedupKey);
-    console.error(`[evaluator] ❌ Failed to enqueue execute-sale for ${token.slice(0, 8)}...:`, addError.message);
+    console.error(`[evaluator] ❌ Failed to enqueue execute-sale for ${token.slice(0, 8)}...:`, errMsg);
+    // Persist the failure — visible without access to Railway logs
+    try {
+      await logActivity({
+        walletId: wallet.id,
+        type: 'sale',
+        asset: token,
+        assetSymbol: symbol,
+        balance: formatUnits(balance, decimals),
+        estimatedValue: formatUnits(currentValue, 18),
+        invested: formatUnits(invested, 18),
+        action: 'ENQUEUE_FAILED',
+        reason: `Failed to enqueue execute-sale: ${errMsg.slice(0, 500)}`,
+      });
+    } catch { /* logging must never mask the original error */ }
     throw addError;
   }
 
