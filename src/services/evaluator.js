@@ -36,7 +36,7 @@ import {
   logActivity,
 } from '../lib/db.js';
 
-import { redis, getSnapshot, setDedup } from '../lib/redis.js';
+import { redis, getSnapshot, setDedup, clearDedup } from '../lib/redis.js';
 
 // --------------------------------------------------
 // Public client — BSC
@@ -225,7 +225,11 @@ async function evaluateTokenPosition(wallet, token, priceSnapshot) {
       priceSnapshotId: priceSnapshot.timestamp,
       detectedAt: Date.now(),
     }, {
-      jobId: dedupKey,
+      // jobId must be unique per attempt — a static jobId (the dedup key) gets
+      // silently dropped by BullMQ when a previous job with the same id still
+      // exists in the retained completed/failed sets. Redis dedup key already
+      // protects against duplicate triggers within the TTL window.
+      jobId: `${dedupKey}:${Date.now()}`,
       removeOnComplete: 100,
       removeOnFail: 50,
     });
